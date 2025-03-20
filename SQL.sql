@@ -12,7 +12,7 @@ CREATE TABLE Rooms (
     description NVARCHAR(MAX),
     price DECIMAL(10, 2) NOT NULL,
     status NVARCHAR(20) DEFAULT 'available',
-    quantity INT NOT NULL
+    quantity INT NOT NULL,
     booked_quantity INT DEFAULT 0;
 );
 

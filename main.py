@@ -143,22 +143,83 @@ async def show_category(chat_id, state: FSMContext):
     categories = data['categories']
     current_category_index = data['current_category_index']
     current_category = categories[current_category_index]
-
     logging.info(f"Показываем категорию: {current_category} для пользователя {chat_id}")
-
     conn = connect_to_db()
     if conn:
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT room_id, description, price FROM Rooms WHERE category = ? AND status = 'available'", (current_category,))
             rooms = cursor.fetchall()
-
             if rooms:
                 media = []
                 for room in rooms:
                     cursor.execute("SELECT image_url FROM RoomImages WHERE room_id = ?", (room.room_id,))
                     images = [row.image_url for row in cursor.fetchall()]
+                    if images:
+                        media.append(InputMediaPhoto(media=images[0], caption=f"Категория: {current_category}\nЦена: {room.price} руб.\n{room.description}"))
+                        media.extend([InputMediaPhoto(media=img) for img in images[1:]])
 
+                # Формируем адаптивную клавиатуру
+                buttons = [
+                    InlineKeyboardButton(text="<<", callback_data="prev_category"),
+                    InlineKeyboardButton(text="Забронировать", callback_data=f"book_{rooms[0].room_id}"),
+                    InlineKeyboardButton(text=">>", callback_data="next_category")
+                ]
+                markup = InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+                # Отправляем медиагруппу и сохраняем список сообщений
+                media_messages = await bot.send_media_group(chat_id, media)
+                media_message_ids = [msg.message_id for msg in media_messages]
+                
+
+                # Отправляем текстовое сообщение с кнопками
+                sent_message = await bot.send_message(chat_id, "Выберите действие👇", reply_markup=markup)
+
+                # Сохраняем идентификаторы сообщений в состоянии
+                await state.update_data(last_text_message_id=sent_message.message_id, media_message_ids=media_message_ids)
+        except pyodbc.Error as e:
+            logging.error(f"Ошибка при получении номеров: {e}")
+        finally:
+            conn.close()
+
+async def update_category(chat_id, state: FSMContext):
+    data = await state.get_data()
+    media_message_ids = data.get("media_message_ids", [])
+    last_text_message_id = data.get("last_text_message_id")
+
+    # Удаляем старые медиасообщения
+    for message_id in media_message_ids:
+        try:
+            await bot.delete_message(chat_id, message_id)
+        except Exception as e:
+            logging.error(f"Ошибка при удалении медиасообщения {message_id}: {e}")
+
+    # Удаляем текстовое сообщение с кнопками
+    if last_text_message_id:
+        try:
+            await bot.delete_message(chat_id, last_text_message_id)
+        except Exception as e:
+            logging.error(f"Ошибка при удалении текстового сообщения {last_text_message_id}: {e}")
+
+    # Получаем текущую категорию
+    categories = data['categories']
+    current_category_index = data['current_category_index']
+    current_category = categories[current_category_index]
+
+    conn = connect_to_db()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT room_id, description, price FROM Rooms WHERE category = ? AND status = 'available'",
+                (current_category,)
+            )
+            rooms = cursor.fetchall()
+            if rooms:
+                media = []
+                for room in rooms:
+                    cursor.execute("SELECT image_url FROM RoomImages WHERE room_id = ?", (room.room_id,))
+                    images = [row.image_url for row in cursor.fetchall()]
                     if images:
                         media.append(InputMediaPhoto(media=images[0], caption=f"Категория: {current_category}\nЦена: {room.price} руб.\n{room.description}"))
                         media.extend([InputMediaPhoto(media=img) for img in images[1:]])
@@ -171,78 +232,175 @@ async def show_category(chat_id, state: FSMContext):
                     ]
                 ])
 
-                # Отправляем медиагруппу и сохраняем список сообщений
+                # Отправляем новую медиагруппу
                 media_messages = await bot.send_media_group(chat_id, media)
                 media_message_ids = [msg.message_id for msg in media_messages]
 
                 # Отправляем текстовое сообщение с кнопками
-                sent_message = await bot.send_message(chat_id, "Выберите действие:", reply_markup=markup)
+                sent_message = await bot.send_message(chat_id, "Выберите действие👇", reply_markup=markup)
 
-                # Сохраняем идентификаторы сообщений в состоянии
+                # Сохраняем новые идентификаторы сообщений в состоянии
                 await state.update_data(last_text_message_id=sent_message.message_id, media_message_ids=media_message_ids)
         except pyodbc.Error as e:
             logging.error(f"Ошибка при получении номеров: {e}")
         finally:
             conn.close()
-
+            
+            
 @router.callback_query()
 async def handle_callback(callback_query: CallbackQuery, state: FSMContext):
     chat_id = callback_query.message.chat.id
-
-    # Получаем сохранённые идентификаторы сообщений (если они есть)
     data = await state.get_data()
-    media_message_ids = data.get("media_message_ids", [])
-    last_text_message_id = data.get("last_text_message_id")
-
-    # Удаляем каждое сообщение из медиагруппы
-    for message_id in media_message_ids:
-        try:
-            await bot.delete_message(chat_id, message_id)
-        except Exception as e:
-            logging.error(f"Ошибка при удалении медиасообщения {message_id}: {e}")
-
-    # Удаляем текстовое сообщение с клавиатурой
-    if last_text_message_id:
-        try:
-            await bot.delete_message(chat_id, last_text_message_id)
-        except Exception as e:
-            logging.error(f"Ошибка при удалении текстового сообщения {last_text_message_id}: {e}")
-
-    # Обновляем состояние, удаляя старые id сообщений
-    await state.update_data(media_message_ids=[], last_text_message_id=None)
-
-    # Извлекаем необходимые данные из состояния
     categories = data.get("categories", [])
     current_category_index = data.get("current_category_index", 0)
 
-    # Обработка колбэка
-    if callback_query.data == "prev_category":
-        current_category_index = (current_category_index - 1) % len(categories)
-        await state.update_data(current_category_index=current_category_index)
-        await show_category(chat_id, state)
-    elif callback_query.data == "next_category":
-        current_category_index = (current_category_index + 1) % len(categories)
-        await state.update_data(current_category_index=current_category_index)
-        await show_category(chat_id, state)
-    elif callback_query.data.startswith("book_"):
-        room_id = int(callback_query.data.split("_")[1])
-        logging.info(f"Пользователь {chat_id} пытается забронировать номер с ID: {room_id}.")
-        conn = connect_to_db()
-        if conn:
-            try:
-                cursor = conn.cursor()
-                cursor.execute("UPDATE Rooms SET quantity = quantity - 1 WHERE room_id = ?", (room_id,))
-                conn.commit()
-                await bot.send_message(chat_id, f"Вы забронировали номер с ID: {room_id}.")
-                logging.info(f"Номер с ID: {room_id} успешно забронирован.")
-            except pyodbc.Error as e:
-                logging.error(f"Ошибка при бронировании: {e}")
-            finally:
-                conn.close()
-    elif callback_query.data == "show_rooms":
-        await rooms(callback_query.message, state)
+    try:
+        # Обработка навигации по категориям
+        if callback_query.data == "prev_category":
+            if categories:
+                current_category_index = (current_category_index - 1) % len(categories)
+                await state.update_data(current_category_index=current_category_index)
+                await update_category(chat_id, state)
+            else:
+                await callback_query.message.answer("Нет доступных категорий.")
 
-    await callback_query.answer()  # Подтверждаем callback
+        elif callback_query.data == "next_category":
+            if categories:
+                current_category_index = (current_category_index + 1) % len(categories)
+                await state.update_data(current_category_index=current_category_index)
+                await update_category(chat_id, state)
+            else:
+                await callback_query.message.answer("Нет доступных категорий.")
+
+        # Обработка бронирования номера
+        elif callback_query.data.startswith("book_"):
+            room_id = callback_query.data.split("_")[1]
+            if room_id.isdigit():
+                room_id = int(room_id)
+                logging.info(f"Пользователь {chat_id} пытается забронировать номер с ID: {room_id}.")
+                conn = connect_to_db()
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("UPDATE Rooms SET quantity = quantity - 1 WHERE room_id = ? AND quantity > 0", (room_id,))
+                        if cursor.rowcount > 0:
+                            conn.commit()
+                            await callback_query.message.answer(f"Вы успешно забронировали номер с ID: {room_id}.")
+                            logging.info(f"Номер с ID: {room_id} успешно забронирован.")
+                        else:
+                            await callback_query.message.answer("Этот номер уже забронирован или отсутствует.")
+                    except Exception as e:
+                        logging.error(f"Ошибка при бронировании: {e}")
+                        await callback_query.message.answer("Произошла ошибка при бронировании.")
+                    finally:
+                        conn.close()
+            else:
+                await callback_query.message.answer("Некорректный ID номера.")
+
+        # Обработка команды показа номеров
+        elif callback_query.data == "show_rooms":
+            await rooms(callback_query.message, state)
+
+        # Обработка команды массовой рассылки
+        elif callback_query.data == "broadcast":
+            if is_admin(callback_query.from_user.id):
+                await callback_query.message.answer("Введите текст рассылки:")
+                await state.set_state(AdminState.waiting_for_broadcast)
+            else:
+                await callback_query.answer("У вас нет прав администратора.")
+
+    except Exception as e:
+        logging.error(f"Ошибка обработки callback: {e}")
+        await callback_query.message.answer("Произошла ошибка при обработке запроса.")
+
+    await callback_query.answer()
+
+# Добавляем новое состояние для рассылки
+class AdminState(StatesGroup):
+    waiting_for_broadcast = State()
+    waiting_for_edit = State()
+
+# Обработчик команды /apanel
+@dp.message(Command("apanel"))
+async def admin_panel(message: types.Message):
+    # Проверяем права администратора
+    if not is_admin(message.from_user.id):
+        await message.answer("У вас нет прав администратора")
+        return
+    
+    # Создаем клавиатуру админки
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Массовая рассылка", callback_data="broadcast")],
+        [InlineKeyboardButton(text="Просмотреть БД", callback_data="DB")]
+    ])
+    
+    await message.answer("Админ-панель:", reply_markup=markup)
+
+
+# Обработчик ввода текста рассылки
+@dp.message(AdminState.waiting_for_broadcast)
+async def send_broadcast(message: types.Message, state: FSMContext):
+    await state.clear()
+    
+    # Получаем всех пользователей из БД
+    users = get_all_users()
+    
+    if not users:
+        await message.answer("Нет пользователей для рассылки.")
+        return
+    
+    # Статистика рассылки
+    success = 0
+    failed = 0
+    
+    for user in users:
+        try:
+            await bot.send_message(user["telegram_id"], message.text)
+            success += 1
+        except Exception as e:
+            logging.error(f"Ошибка отправки пользователю {user['telegram_id']}: {e}")
+            failed += 1
+        await asyncio.sleep(0.1)  # Задержка для избежания рейт-лимита
+    
+    await message.answer(
+        f"Рассылка завершена!\n"
+        f"Успешно: {success}\n"
+        f"Не доставлено: {failed}"
+    )
+
+
+# Функция проверки админских прав
+def is_admin(telegram_id):
+    conn = connect_to_db()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT admin FROM Users WHERE telegram_id = ?", (telegram_id,))
+            result = cursor.fetchone()
+            return result and result[0] == 1
+        except pyodbc.Error as e:
+            logging.error(f"Ошибка проверки админа: {e}")
+        finally:
+            conn.close()
+    return False
+
+# Функция получения всех пользователей
+def get_all_users():
+    conn = connect_to_db()
+    if conn:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id FROM Users")
+            rows = cursor.fetchall()
+            # Преобразуем результат в список словарей
+            users = [{"telegram_id": row[0]} for row in rows]
+            return users
+        except pyodbc.Error as e:
+            logging.error(f"Ошибка получения пользователей: {e}")
+        finally:
+            conn.close()
+    return []
+
 
 async def main():
     logging.info("Бот запущен.")
